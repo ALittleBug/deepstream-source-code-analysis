@@ -33,4 +33,4 @@
 
 
 ```
-refer [offical link](https://linux.die.net/man/3/getopt_long) [link1](https://www.jianshu.com/p/80cdbf718916)
+for optind refer [offical link](https://linux.die.net/man/3/getopt_long) [link1](https://www.jianshu.com/p/80cdbf718916)
