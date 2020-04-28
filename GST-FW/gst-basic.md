@@ -6,8 +6,6 @@
 
 # GST BASIC
 
-[TOC]
-
 ## Gst Event
 * refer [llink](https://blog.csdn.net/knowledgebao/article/details/84621238)
 >Gstreamer-GstEvent：https://blog.csdn.net/knowledgebao/article/details/86065064
