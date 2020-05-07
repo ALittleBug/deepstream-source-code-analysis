@@ -17,3 +17,10 @@ struct _GstNvInfer {
   std::unique_ptr<GstBufferPool, decltype(pool_deleter)> pool_ptr (
       gst_buffer_pool_new (), pool_deleter);
 ```
+
+refer [link](https://blog.csdn.net/lusirking/article/details/83988421)
+```cpp
+/* Default constructor. */
+NvDsInferContextImpl::NvDsInferContextImpl()
+    : INvDsInferContext(), m_Batches(NVDSINFER_MIN_OUTPUT_BUFFERPOOL_SIZE) {}
+```
