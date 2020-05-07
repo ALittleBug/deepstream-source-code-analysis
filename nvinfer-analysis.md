@@ -1,10 +1,85 @@
 ## pre process call stack
 
 ```
-
+gst_nvinfer_start -> createNvDsInferContext -> new NvDsInferContextImpl()
+                                               -> ctx->initialize
 ```
 
 ```cpp
+//in gstnvinfer.cpp
+/**
+ * Initialize all resources and start the output thread
+ */
+static gboolean
+gst_nvinfer_start (GstBaseTransform * btrans)
+{
+  GstNvInfer *nvinfer = GST_NVINFER (btrans);
+  GstAllocationParams allocation_params;
+  cudaError_t cudaReturn;
+  NvBufSurfaceColorFormat color_format;
+  NvDsInferStatus status;
+  std::string nvtx_str;
+  DsNvInferImpl *impl = DS_NVINFER_IMPL (nvinfer);
+  NvDsInferContextHandle infer_context = nullptr;
+
+ ...
+  /* Create the NvDsInferContext instance. */
+  status =
+      createNvDsInferContext (&infer_context, *init_params,
+      nvinfer, gst_nvinfer_logger);
+  ...
+}
+
+//in nvdsinfer_context.h
+/** An opaque pointer type to be used as a handle for a context instance. */
+typedef struct INvDsInferContext * NvDsInferContextHandle;
+
+//in nvdsinfer_context_impl.cpp
+/*
+ * Factory function to create an NvDsInferContext instance and initialize it with
+ * supplied parameters.
+ */
+NvDsInferStatus
+createNvDsInferContext(NvDsInferContextHandle *handle,
+        NvDsInferContextInitParams &initParams, void *userCtx,
+        NvDsInferContextLoggingFunc logFunc)
+{
+    NvDsInferStatus status;
+    NvDsInferContextImpl *ctx = new NvDsInferContextImpl();
+
+    status = ctx->initialize(initParams, userCtx, logFunc);
+    if (status == NVDSINFER_SUCCESS)
+    {
+        *handle = ctx; // 
+    }
+    else
+    {
+        static_cast<INvDsInferContext *>(ctx)->destroy();
+    }
+    return status;
+}
+
+//in nvdsinfer_context_impl.h
+/**
+ * Implementation of the INvDsInferContext interface.
+ */
+class NvDsInferContextImpl : public INvDsInferContext
+{
+public:
+    /**
+     * Default constructor.
+     */
+    NvDsInferContextImpl();
+
+    /**
+     * Initializes the Infer engine, allocates layer buffers and other required
+     * initialization steps.
+     */
+    NvDsInferStatus initialize(NvDsInferContextInitParams &initParams,
+            void *userCtx, NvDsInferContextLoggingFunc logFunc);
+...
+}
+
 //in gstnvinfer.cpp
 /* Helper function to queue a batch for inferencing and push it to the element's
  * processing queue. */
@@ -14,10 +89,96 @@ gst_nvinfer_input_queue_loop (gpointer data) {
   DsNvInferImpl *impl = DS_NVINFER_IMPL (nvinfer);
 ...
   NvDsInferContextPtr nvdsinfer_ctx = impl->m_InferCtx;
+...
+  status = nvdsinfer_ctx->queueInputBatch (input_batch);
 }
 
 //in gstnvinfer_impl.h
 using NvDsInferContextPtr = std::shared_ptr<INvDsInferContext>;
+
+class DsNvInferImpl
+{
+public:
+  using ContextReplacementPtr =
+      std::unique_ptr<std::tuple<NvDsInferContextPtr, NvDsInferContextInitParamsPtr, std::string>>;
+
+  DsNvInferImpl (GstNvInfer *infer);
+  ~DsNvInferImpl ();
+  /* Start the model load thread. */
+  NvDsInferStatus start ();
+  /* Stop the model load thread. Release the NvDsInferContext. */
+  void stop ();
+
+  bool isContextReady () const { return m_InferCtx.get(); }
+
+  /** Load new model in separate thread */
+  bool triggerNewModel (const std::string &modelPath, ModelLoadType loadType);
+
+  /** replace context, action in submit_input_buffer */
+  NvDsInferStatus ensureReplaceNextContext ();
+  void notifyLoadModelStatus (const ModelStatus &res);
+
+  /** NvDsInferContext to be used for inferencing. */
+  NvDsInferContextPtr m_InferCtx;
+
+  /** NvDsInferContext initialization params. */
+  NvDsInferContextInitParamsPtr m_InitParams;
+...
+}
+
+//in gstnvinfer.cpp
+//Create a instance of DsNvInferImpl
+static void
+gst_nvinfer_init (GstNvInfer * nvinfer)
+{
+  GstBaseTransform *btrans = GST_BASE_TRANSFORM (nvinfer);
+
+  /* We will not be generating a new buffer. Just adding / updating
+   * metadata. */
+  gst_base_transform_set_in_place (GST_BASE_TRANSFORM (btrans), TRUE);
+  /* We do not want to change the input caps. Set to passthrough. transform_ip
+   * is still called. */
+  gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (btrans), TRUE);
+
+  // little trick to use pointer and reinterpret_cast
+  nvinfer->impl = reinterpret_cast<GstNvInferImpl*>(new DsNvInferImpl(nvinfer));
+  ...
+}
+
+//in gstnvinfer_impl.cpp
+//call NvDsInferContext_ResetInitParams
+DsNvInferImpl::DsNvInferImpl (GstNvInfer * infer)
+  : m_InitParams (new NvDsInferContextInitParams),
+    m_GstInfer (infer)
+{
+  NvDsInferContext_ResetInitParams (m_InitParams.get ());
+}
+
+//in gstnvinfer_impl.cpp
+/*
+ * Reset the members inside the initParams structure to default values.
+ */
+void
+NvDsInferContext_ResetInitParams (NvDsInferContextInitParams *initParams)
+{
+    if (initParams == nullptr)
+    {
+        fprintf(stderr, "Warning. NULL initParams passed to "
+                "NvDsInferContext_ResetInitParams()\n");
+        return;
+    }
+
+    memset(initParams, 0, sizeof (*initParams));
+
+    initParams->networkMode = NvDsInferNetworkMode_FP32;
+    initParams->networkInputFormat = NvDsInferFormat_Unknown;
+    initParams->uffInputOrder = NvDsInferTensorOrder_kNCHW;
+    initParams->maxBatchSize = 1;
+    initParams->networkScaleFactor = 1.0;
+    initParams->networkType = NvDsInferNetworkType_Detector;
+    initParams->outputBufferPoolSize = NVDSINFER_MIN_OUTPUT_BUFFERPOOL_SIZE;
+}
+
 ```
 ## post process call stack
 ```
