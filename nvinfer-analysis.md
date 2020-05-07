@@ -1,3 +1,24 @@
+## pre process call stack
+
+```
+
+```
+
+```cpp
+//in gstnvinfer.cpp
+/* Helper function to queue a batch for inferencing and push it to the element's
+ * processing queue. */
+static gpointer
+gst_nvinfer_input_queue_loop (gpointer data) {
+...
+  DsNvInferImpl *impl = DS_NVINFER_IMPL (nvinfer);
+...
+  NvDsInferContextPtr nvdsinfer_ctx = impl->m_InferCtx;
+}
+
+//in gstnvinfer_impl.h
+using NvDsInferContextPtr = std::shared_ptr<INvDsInferContext>;
+```
 ## post process call stack
 ```
 gst_nvinfer_output_loop -> NvDsInferContextImpl::dequeueOutputBatch(NvDsInferContextBatchOutput &batchOutput)
