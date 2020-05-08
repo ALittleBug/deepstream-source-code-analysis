@@ -180,6 +180,216 @@ NvDsInferContext_ResetInitParams (NvDsInferContextInitParams *initParams)
 }
 
 ```
+```cpp
+// in nvdsinfer_context_impl.cpp
+/* The function performs all the initialization steps required by the inference
+ * engine. */
+NvDsInferStatus
+NvDsInferContextImpl::initialize(NvDsInferContextInitParams& initParams,
+        void* userCtx, NvDsInferContextLoggingFunc logFunc)
+{
+    ...
+    
+    /* Load the custom library if specified. */
+    if (!string_empty(initParams.customLibPath))
+    {
+        std::unique_ptr<DlLibHandle> dlHandle =
+            std::make_unique<DlLibHandle>(initParams.customLibPath, RTLD_LAZY);
+        if (!dlHandle->isValid())
+        {
+            printError("Could not open custom lib: %s", dlerror());
+            return NVDSINFER_CUSTOM_LIB_FAILED;
+        }
+        m_CustomLibHandle = std::move(dlHandle); //dlHaddle is std::unique_ptr type
+    }
+
+    m_BackendContext = generateBackendContext(initParams); //create BackendContext
+    if (!m_BackendContext)
+    {
+        printError("generate backend failed, check config file settings");
+        return NVDSINFER_CONFIG_FAILED;
+    }
+
+    RETURN_NVINFER_ERROR(initInferenceInfo(initParams, *m_BackendContext),
+        "Infer context initialize inference info failed");
+    assert(m_AllLayerInfo.size());
+
+    RETURN_NVINFER_ERROR(preparePreprocess(initParams),
+        "Infer Context prepare preprocessing resource failed.");
+    assert(m_Preprocessor);
+
+    RETURN_NVINFER_ERROR(preparePostprocess(initParams),
+        "Infer Context prepare postprocessing resource failed.");
+    assert(m_Postprocessor);
+
+    /* Allocate binding buffers on the device and the corresponding host
+     * buffers. */
+    NvDsInferStatus status = allocateBuffers();
+    if (status != NVDSINFER_SUCCESS)
+    {
+        printError("Failed to allocate buffers");
+        return status;
+    }
+
+    /* If there are more than one input layers (non-image input) and custom
+     * library is specified, try to initialize these layers. */
+    if (m_InputDeviceBuffers.size() > 1)
+    {
+        NvDsInferStatus status = initNonImageInputLayers();
+        if (status != NVDSINFER_SUCCESS)
+        {
+            printError("Failed to initialize non-image input layers");
+            return status;
+        }
+    }
+
+    m_Initialized = true;
+    return NVDSINFER_SUCCESS;
+}
+
+// in nvdsinfer_context_impl.cpp
+/* Deserialize engine and create backend context for the model from the init
+ * params (caffemodel & prototxt/uff/onnx/etlt&key/custom-parser, int8
+ * calibration tables, etc) and return the backend */
+
+std::unique_ptr<BackendContext>
+NvDsInferContextImpl::generateBackendContext(NvDsInferContextInitParams& initParams)
+{
+    int dla = -1;
+    if (initParams.useDLA && initParams.dlaCore >= 0)
+        dla = initParams.dlaCore;
+
+    std::shared_ptr<TrtEngine> engine;  // TODO why using shared_ptr
+    std::unique_ptr<BackendContext> backend;
+    if (!string_empty(initParams.modelEngineFilePath))
+    {
+        if (!deserializeEngineAndBackend(
+                initParams.modelEngineFilePath, dla, engine, backend))
+        {
+            printWarning(
+                "deserialize backend context from engine from file :%s failed, "
+                "try rebuild",
+                safeStr(initParams.modelEngineFilePath));
+        }
+    }
+
+    if (backend &&
+        checkBackendParams(*backend, initParams) == NVDSINFER_SUCCESS)
+    {
+        printInfo("Use deserialized engine model: %s",
+            safeStr(initParams.modelEngineFilePath));
+        return backend;
+    }
+    else if (backend)
+    {
+        printWarning(
+            "deserialized backend context :%s failed to match config params, "
+            "trying rebuild",
+            safeStr(initParams.modelEngineFilePath));
+        backend.reset();
+        engine.reset();
+    }
+
+    backend = buildModel(initParams);  // build the model if deserized fail
+...
+    return backend;
+}
+
+/* Create engine and backend context for the model from the init params
+ * (caffemodel & prototxt/uff/onnx, int8 calibration tables, etc) and return the
+ * backend */
+std::unique_ptr<BackendContext>
+NvDsInferContextImpl::buildModel(NvDsInferContextInitParams& initParams)
+{
+    printInfo("Trying to create engine from model files");
+
+    std::unique_ptr<TrtModelBuilder> builder =
+        std::make_unique<TrtModelBuilder>(
+            initParams.gpuID, *gTrtLogger, m_CustomLibHandle);
+    assert(builder);
+
+    if (!string_empty(initParams.int8CalibrationFilePath) &&
+        file_accessible(initParams.int8CalibrationFilePath))
+    {
+        auto calibrator = std::make_unique<NvDsInferInt8Calibrator>(
+            initParams.int8CalibrationFilePath);
+        builder->setInt8Calibrator(std::move(calibrator));
+    }
+
+    std::string enginePath;
+    std::shared_ptr<TrtEngine> engine =
+        builder->buildModel(initParams, enginePath);
+    if (!engine)
+    {
+        printError("build engine file failed");
+        return nullptr;
+    }
+
+    if (builder->serializeEngine(enginePath, engine->engine()) !=
+        NVDSINFER_SUCCESS)
+    {
+        printWarning(
+            "failed to serialize cude engine to file: %s", safeStr(enginePath));
+    }
+    else
+    {
+        printInfo("serialize cuda engine to file: %s successfully",
+            safeStr(enginePath));
+    }
+
+    std::unique_ptr<BackendContext> backend;
+    auto newBackend = createBackendContext(engine);
+    if (!newBackend)
+    {
+        printWarning("create backend context from engine failed");
+        return nullptr;
+    }
+
+    engine->printEngineInfo();
+
+    backend = std::move(newBackend);
+
+    if (checkBackendParams(*backend, initParams) != NVDSINFER_SUCCESS)
+    {
+        printError(
+            "deserialized backend context :%s failed to match config params",
+            safeStr(enginePath));
+        return nullptr;
+    }
+
+    builder.reset();
+
+    return backend;
+}
+
+
+```
+```cpp
+// in nvdsinfer_backend.h
+/**
+ * Helper class for managing Cuda Streams.
+ */
+class CudaStream
+{
+public:
+    explicit CudaStream(uint flag = cudaStreamDefault, int priority = 0); //TODO explicit
+    ~CudaStream();
+    operator cudaStream_t() { return m_Stream; }
+    cudaStream_t& ptr() { return m_Stream; }
+    SIMPLE_MOVE_COPY(CudaStream)
+
+private:
+    void move_copy(CudaStream&& o) // move implementaton for rvalue 
+    {
+        m_Stream = o.m_Stream;
+        o.m_Stream = nullptr;
+    }
+    DISABLE_CLASS_COPY(CudaStream);
+
+    cudaStream_t m_Stream = nullptr;
+};
+
+```
 ## post process call stack
 ```
 gst_nvinfer_output_loop -> NvDsInferContextImpl::dequeueOutputBatch(NvDsInferContextBatchOutput &batchOutput)
