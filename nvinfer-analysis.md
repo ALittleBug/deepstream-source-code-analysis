@@ -338,7 +338,7 @@ NvDsInferContextImpl::buildModel(NvDsInferContextInitParams& initParams)
     }
 
     std::unique_ptr<BackendContext> backend;
-    auto newBackend = createBackendContext(engine);
+    auto newBackend = createBackendContext(engine); // TODO why not assign the return value to backend
     if (!newBackend)
     {
         printWarning("create backend context from engine failed");
