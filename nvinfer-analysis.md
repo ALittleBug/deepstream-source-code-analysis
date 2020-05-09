@@ -2,7 +2,9 @@
 
 ```
 gst_nvinfer_start -> createNvDsInferContext -> new NvDsInferContextImpl()
-                                               -> ctx->initialize
+                                               -> ctx->initialize -> NvDsInferContextImpl::initInferenceInfo (initialize  m_OutputLayerInfo)
+                                                                  -> NvDsInferContextImpl::preparePreprocess
+                                                                  -> NvDsInferContextImpl::preparePostprocess
 ```
 
 ```cpp
