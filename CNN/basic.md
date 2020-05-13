@@ -5,3 +5,10 @@
 
     * refer [link](https://blog.csdn.net/qq_29381089/article/details/80688255)
     * pool kernel size, stride, padding, `no parameters`
+* Underfitting and  overfitting
+  * refer [link] (https://blog.csdn.net/u011630575/article/details/71158656)
+* gradient vanishing and exploding
+
+* Batch Normalization
+
+* backbone
