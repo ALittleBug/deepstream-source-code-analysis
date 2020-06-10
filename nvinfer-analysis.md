@@ -299,12 +299,13 @@ NvDsInferContextImpl::generateBackendContext(NvDsInferContextInitParams& initPar
 }
 ```
 ## build model call stack
+```
 NvDsInferContextImpl::generateBackendContext ->
                     ->deserializeEngineAndBackend x
                     ->buildModel  ->TrtModelBuilder::buildModel -> getCudaEngineFromCustomLib x
                                                                 -> buildNetwork
                                   ->     ::serializeEngine      -> buildEngine
-
+```
 ```cpp
 /* Create engine and backend context for the model from the init params
  * (caffemodel & prototxt/uff/onnx, int8 calibration tables, etc) and return the
