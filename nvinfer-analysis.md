@@ -297,7 +297,15 @@ NvDsInferContextImpl::generateBackendContext(NvDsInferContextInitParams& initPar
 ...
     return backend;
 }
+```
+## build model call stack
+NvDsInferContextImpl::generateBackendContext ->
+                    ->deserializeEngineAndBackend x
+                    ->buildModel  ->TrtModelBuilder::buildModel -> getCudaEngineFromCustomLib x
+                                                                -> buildNetwork
+                                  ->     ::serializeEngine      -> buildEngine
 
+```cpp
 /* Create engine and backend context for the model from the init params
  * (caffemodel & prototxt/uff/onnx, int8 calibration tables, etc) and return the
  * backend */
@@ -364,8 +372,159 @@ NvDsInferContextImpl::buildModel(NvDsInferContextInitParams& initParams)
 
     return backend;
 }
+```
+```cpp
+//in nvdsinfer_model_builder.cpp
+/* Build the model and return the generated engine. */
+std::unique_ptr<TrtEngine>
+TrtModelBuilder::buildModel(const NvDsInferContextInitParams& initParams,
+    std::string& suggestedPathName)
+{
+...
+    if (cudaEngineGetFcn || cudaEngineGetDeprecatedFcn ||
+            !string_empty(initParams.tltEncodedModelFilePath))
+    {
+    //generating customized cuda engien or for TLT modle
+        if (cudaEngineGetFcn || cudaEngineGetDeprecatedFcn)
+        {
+            /* NvDsInferCudaEngineGet interface provided. */
+            char *cwd = getcwd(NULL, 0);
+            modelPath = std::string(cwd) + "/model";
+            free(cwd);
+        }
+        else
+        {
+            /* TLT model. Use NvDsInferCudaEngineGetFromTltModel function
+             * provided by nvdsinferutils. */
+            cudaEngineGetFcn = NvDsInferCudaEngineGetFromTltModel;
+            modelPath = safeStr(initParams.tltEncodedModelFilePath);
+        }
 
+        engine = getCudaEngineFromCustomLib (cudaEngineGetDeprecatedFcn,
+                cudaEngineGetFcn, initParams, networkMode);
+    ...
+    }
+    else
+    {
+        /* Parse the network. */
+        NvDsInferStatus status = buildNetwork(initParams);
+    ...
+        /* Build the engine from the parsed network and build parameters. */
+        engine = buildEngine();
+    ...
+    }
+}
 
+NvDsInferStatus
+TrtModelBuilder::buildNetwork(const NvDsInferContextInitParams& initParams)
+{
+    std::unique_ptr<BaseModelParser> parser;
+    assert(m_Builder);
+
+    /* check custom model parser first */
+    if (m_DlLib && READ_SYMBOL(m_DlLib, NvDsInferCreateModelParser))
+    {
+        parser.reset(new CustomModelParser(initParams, m_DlLib));
+    }
+    /* Check for caffe model files. */
+    else if (!string_empty(initParams.modelFilePath) &&
+             !string_empty(initParams.protoFilePath))
+    {
+        parser.reset(new CaffeModelParser(initParams, m_DlLib));
+    }
+    /* Check for UFF model. */
+    else if (!string_empty(initParams.uffFilePath))
+    {
+        parser.reset(new UffModelParser(initParams, m_DlLib));
+    }
+    /* Check for Onnx model. */
+    else if (!string_empty(initParams.onnxFilePath))
+    {
+        parser.reset(new OnnxModelParser(initParams, m_DlLib));
+    }
+    else
+    {
+        dsInferError(
+            "failed to build network since there is no model file matched.");
+        return NVDSINFER_CONFIG_FAILED;
+    }
+
+    if (!parser || !parser->isValid())
+    {
+        dsInferError("failed to build network because of invalid parsers.");
+        return NVDSINFER_CONFIG_FAILED;
+    }
+
+    for(unsigned int i = 0; i < initParams.numOutputIOFormats; ++i)
+    {
+        assert(initParams.outputIOFormats[i]);
+        std::string outputIOFormat(initParams.outputIOFormats[i]);
+        size_t pos1 = outputIOFormat.find(":");
+        if(pos1 == std::string::npos)
+        {
+            dsInferError("failed to parse outputIOFormart %s."
+            "Expected layerName:type:fmt", initParams.outputIOFormats[i]);
+            return NVDSINFER_CONFIG_FAILED;
+        }
+        size_t pos2 = outputIOFormat.find(":", pos1+1);
+        if(pos2 == std::string::npos)
+        {
+            dsInferError("failed to parse outputIOFormart %s."
+            "Expected layerName:type:fmt", initParams.outputIOFormats[i]);
+            return NVDSINFER_CONFIG_FAILED;
+        }
+        std::string layerName = outputIOFormat.substr(0,pos1);
+        std::string dataType = outputIOFormat.substr(pos1+1,pos2-pos1-1);
+        if(!isValidOutputDataType(dataType))
+        {
+            dsInferError("Invalid data output datatype specified %s",
+            dataType.c_str());
+            return NVDSINFER_CONFIG_FAILED;
+        }
+        std::string format = outputIOFormat.substr(pos2+1);
+        if(!isValidOutputFormat(format))
+        {
+            dsInferError("Invalid output data format specified %s",
+            format.c_str());
+            return NVDSINFER_CONFIG_FAILED;
+        }
+    }
+    std::unique_ptr<BuildParams> buildOptions;
+    nvinfer1::NetworkDefinitionCreationFlags netDefFlags = 0;
+    /* Create build parameters to build the network as a full dimension network
+     * only if the parser supports it and DLA is not to be used. Otherwise build
+     * the network as an implicit batch dim network. */
+    if (parser->hasFullDimsSupported() &&
+            !initParams.forceImplicitBatchDimension)
+    {
+        netDefFlags |=
+            (1U << static_cast<uint32_t>(
+                 nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH));
+        buildOptions = createDynamicParams(initParams);
+    }
+    else
+    {
+        buildOptions = createImplicitParams(initParams);
+    }
+
+    UniquePtrWDestroy<nvinfer1::INetworkDefinition> network =
+        m_Builder->createNetworkV2(netDefFlags);
+    assert(network);
+
+    /* Parse the model using IModelParser interface. */
+    NvDsInferStatus status = parser->parseModel(*network);
+    if (status != NVDSINFER_SUCCESS)
+    {
+        dsInferError("failed to build network since parsing model errors.");
+        return status;
+    }
+
+    assert(!m_Network);
+    m_Network = std::move(network);
+    m_Options = std::move(buildOptions);
+    m_Parser = std::move(parser);
+    return NVDSINFER_SUCCESS;
+}
 ```
 ```cpp
 // in nvdsinfer_backend.h
