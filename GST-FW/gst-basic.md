@@ -15,3 +15,46 @@
 ## Multithread in gstreamer
 
 refer [gst tutorial](https://gstreamer.freedesktop.org/documentation/tutorials/basic/multithreading-and-pad-availability.html?gi-language=c#)
+
+## GstStructrue
+
+proxy pattern
+```cpp
+ GstStructureField
+ typedef struct
+{
+  GstStructure s;
+
+  /* owned by parent structure, NULL if no parent */
+  gint *parent_refcount;
+
+  GArray *fields;
+} GstStructureImpl;
+struct _GstStructureField
+{
+  GQuark name;
+  GValue value;
+};
+struct _GstStructure {
+  GType type;
+
+  /*< private >*/
+  GQuark name;
+};
+static GstStructure *
+gst_structure_new_id_empty_with_size (GQuark quark, guint prealloc)
+{
+  GstStructureImpl *structure;
+
+  structure = g_slice_new (GstStructureImpl);
+  ((GstStructure *) structure)->type = _gst_structure_type;
+  ((GstStructure *) structure)->name = quark;
+  GST_STRUCTURE_REFCOUNT (structure) = NULL;
+  GST_STRUCTURE_FIELDS (structure) =
+      g_array_sized_new (FALSE, FALSE, sizeof (GstStructureField), prealloc);
+
+  GST_TRACE ("created structure %p", structure);
+
+  return GST_STRUCTURE_CAST (structure);
+}
+```
